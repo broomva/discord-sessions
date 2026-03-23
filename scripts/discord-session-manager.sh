@@ -431,6 +431,10 @@ for cid, info in reg.items():
       last_activity=$(tmux display-message -t "$sn" -p '#{pane_last_activity}' 2>/dev/null || echo "$now")
       local idle_for=$((now - last_activity))
 
+      if [[ -f "$(_state_dir "$cid")/.no-idle" ]]; then
+        continue
+      fi
+
       if (( idle_for > idle_seconds )); then
         local idle_min=$((idle_for / 60))
         echo "  SUSPEND  ${name} (idle ${idle_min}m)"
@@ -481,6 +485,18 @@ cmd_wake_all() {
   done
   echo "Cleared $woke suspend flags. Run respawn-dead to bring them back."
   cmd_respawn_dead
+}
+
+cmd_pin() {
+  local id="${1:?Usage: pin <channel_id>}"
+  touch "$(_state_dir "$id")/.no-idle"
+  echo "PINNED  $(_session_name "$id") — will not be suspended"
+}
+
+cmd_unpin() {
+  local id="${1:?Usage: unpin <channel_id>}"
+  rm -f "$(_state_dir "$id")/.no-idle"
+  echo "UNPINNED  $(_session_name "$id")"
 }
 
 cmd_cleanup_stale() {
@@ -814,6 +830,8 @@ case "${1:-help}" in
   suspend-idle)      cmd_suspend_idle ;;
   wake)              shift; cmd_wake "$@" ;;
   wake-all)          cmd_wake_all ;;
+  pin)               shift; cmd_pin "$@" ;;
+  unpin)             shift; cmd_unpin "$@" ;;
   create-channel)    shift; cmd_create_channel "$@" ;;
   motd)              cmd_motd ;;
   set-status)        cmd_set_channel_topic ;;
@@ -838,6 +856,8 @@ Discord Session Manager — per-channel Claude Code sessions via tmux
   suspend-idle        Suspend sessions idle beyond DISCORD_IDLE_TIMEOUT (default: 30m)
   wake <id>           Wake a suspended session
   wake-all            Wake all suspended sessions
+  pin <id>            Pin a session — never suspend it
+  unpin <id>          Unpin — allow idle suspension again
   create-channel <name> [--workdir <path>]  Create a Discord channel + spawn its session
   motd                Show active session count and watchdog status
   set-status          Update the status channel topic with session count
