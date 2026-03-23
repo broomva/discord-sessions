@@ -51,8 +51,11 @@ cmd_run() {
     fi
 
     if (( now - last_cleanup >= CLEANUP_INTERVAL )); then
-      _log "Running stale session cleanup..."
+      _log "Running stale session cleanup + idle suspension..."
       "$MANAGER" cleanup-stale 2>&1 | while read -r line; do
+        [[ -n "$line" ]] && _log "$line"
+      done
+      "$MANAGER" suspend-idle 2>&1 | while read -r line; do
         [[ -n "$line" ]] && _log "$line"
       done
       last_cleanup=$now

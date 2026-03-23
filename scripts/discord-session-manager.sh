@@ -382,6 +382,10 @@ for cid, info in reg.items():
     print(f'{cid} {info[\"type\"]} {info[\"name\"]} {info.get(\"parent\") or \"-\"}')
 " | while IFS=' ' read -r cid type name parent; do
     if ! _is_alive "$cid"; then
+      # Skip suspended sessions
+      if [[ -f "$(_state_dir "$cid")/.suspended" ]]; then
+        continue
+      fi
       echo "RESPAWNING $(_session_name "$cid") ($type: $name)"
       _ensure_state_dir "$cid"
       local wd=""
@@ -401,6 +405,82 @@ for cid, info in reg.items():
       fi
     fi
   done
+}
+
+cmd_suspend_idle() {
+  # Kill sessions that have been idle (no tmux activity) beyond the threshold
+  local idle_minutes="${DISCORD_IDLE_TIMEOUT:-30}"
+  local idle_seconds=$((idle_minutes * 60))
+  _ensure_dirs
+
+  local suspended=0
+  local now
+  now=$(date +%s)
+
+  python3 -c "
+import json
+with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
+for cid, info in reg.items():
+    print(f'{cid} {info[\"name\"]}')
+" | while IFS=' ' read -r cid name; do
+    if _is_alive "$cid"; then
+      local sn
+      sn="$(_session_name "$cid")"
+      # Get tmux pane last activity timestamp
+      local last_activity
+      last_activity=$(tmux display-message -t "$sn" -p '#{pane_last_activity}' 2>/dev/null || echo "$now")
+      local idle_for=$((now - last_activity))
+
+      if (( idle_for > idle_seconds )); then
+        local idle_min=$((idle_for / 60))
+        echo "  SUSPEND  ${name} (idle ${idle_min}m)"
+        tmux kill-session -t "$sn" 2>/dev/null || true
+        # Mark as suspended so respawn-dead skips it
+        echo "$now" > "$(_state_dir "$cid")/.suspended"
+        suspended=$((suspended + 1))
+      fi
+    fi
+  done
+  echo "Suspended $suspended sessions (threshold: ${idle_minutes}m)"
+}
+
+cmd_wake() {
+  # Wake a specific suspended session
+  local id="${1:?Usage: wake <channel_id>}"
+  local suspend_file
+  suspend_file="$(_state_dir "$id")/.suspended"
+  [[ -f "$suspend_file" ]] && rm -f "$suspend_file"
+
+  if ! _is_alive "$id"; then
+    # Trigger respawn
+    local name="" wd="" session_uuid=""
+    name=$(python3 -c "
+import json
+with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
+print(reg.get('$id', {}).get('name', 'unknown'))
+" 2>/dev/null)
+    [[ -f "$(_state_dir "$id")/.workdir" ]] && wd="$(cat "$(_state_dir "$id")/.workdir")"
+    session_uuid="$(_read_session_id "$id")"
+    _ensure_state_dir "$id"
+    _spawn_tmux "$id" "$name" "" "$wd" "$session_uuid"
+    echo "WOKE  $(_session_name "$id")  name=$name"
+  else
+    echo "ALIVE  $(_session_name "$id") (not suspended)"
+  fi
+}
+
+cmd_wake_all() {
+  _ensure_dirs
+  local woke=0
+  for sf in "$SESSIONS_DIR"/*/.suspended; do
+    [[ -f "$sf" ]] || continue
+    local cid
+    cid=$(basename "$(dirname "$sf")")
+    rm -f "$sf"
+    woke=$((woke + 1))
+  done
+  echo "Cleared $woke suspend flags. Run respawn-dead to bring them back."
+  cmd_respawn_dead
 }
 
 cmd_cleanup_stale() {
@@ -731,6 +811,9 @@ case "${1:-help}" in
   discover-threads)  cmd_discover_threads ;;
   discover-all)      cmd_discover; echo ""; cmd_discover_threads ;;
   cleanup-stale)     cmd_cleanup_stale ;;
+  suspend-idle)      cmd_suspend_idle ;;
+  wake)              shift; cmd_wake "$@" ;;
+  wake-all)          cmd_wake_all ;;
   create-channel)    shift; cmd_create_channel "$@" ;;
   motd)              cmd_motd ;;
   set-status)        cmd_set_channel_topic ;;
@@ -752,7 +835,10 @@ Discord Session Manager — per-channel Claude Code sessions via tmux
   discover-threads    Auto-detect active threads and spawn sessions
   discover-all        Both channels + threads
   cleanup-stale       Kill sessions for deleted channels or archived threads
-  create-channel <name>  Create a Discord channel + spawn its session
+  suspend-idle        Suspend sessions idle beyond DISCORD_IDLE_TIMEOUT (default: 30m)
+  wake <id>           Wake a suspended session
+  wake-all            Wake all suspended sessions
+  create-channel <name> [--workdir <path>]  Create a Discord channel + spawn its session
   motd                Show active session count and watchdog status
   set-status          Update the status channel topic with session count
   list                List sessions with UP/DOWN status
