@@ -11,6 +11,7 @@ SESSIONS_DIR="$HOME/.claude/discord-sessions"
 SESSIONS_REGISTRY="$SESSIONS_DIR/sessions.json"
 SESSIONS_MD="$SESSIONS_DIR/SESSIONS.md"
 CONFIG_FILE="$SESSIONS_DIR/config.env"
+WORKDIR_MAP="$SESSIONS_DIR/workdir-map.json"
 TMUX_PREFIX="dc"
 
 # ── Load config ──────────────────────────────────────────────────────────
@@ -119,6 +120,35 @@ with open('$SESSIONS_MD', 'w') as f: f.write('\n'.join(lines))
 }
 
 _is_alive() { tmux has-session -t "$(_session_name "$1")" 2>/dev/null; }
+
+_resolve_workdir() {
+  # Resolve a channel/thread name to a workdir via workdir-map.json.
+  # Falls back to the global WORKDIR if the map file is missing or the name is not found.
+  local name="$1"
+  if [[ -z "$name" || ! -f "$WORKDIR_MAP" ]]; then
+    echo "$WORKDIR"
+    return
+  fi
+  local mapped
+  mapped=$(python3 -c "
+import json, sys, os
+try:
+    with open('$WORKDIR_MAP') as f:
+        m = json.load(f)
+    path = m.get('$name', '')
+    if path:
+        print(os.path.expandvars(path))
+    else:
+        print('')
+except Exception:
+    print('')
+" 2>/dev/null) || mapped=""
+  if [[ -n "$mapped" ]]; then
+    echo "$mapped"
+  else
+    echo "$WORKDIR"
+  fi
+}
 
 _read_bot_token() {
   sed -n 's/^DISCORD_BOT_TOKEN=//p' "$DISCORD_MAIN_DIR/.env"
@@ -323,12 +353,28 @@ cmd_discover() {
   local manager_path="$0"
   curl -sS -H "Authorization: Bot $token" \
     "https://discord.com/api/v10/guilds/${GUILD_ID}/channels" \
-  | REGISTRY="$SESSIONS_REGISTRY" MANAGER="$manager_path" python3 -c "
+  | REGISTRY="$SESSIONS_REGISTRY" MANAGER="$manager_path" WORKDIR_MAP_FILE="$WORKDIR_MAP" DEFAULT_WORKDIR="$WORKDIR" python3 -c "
 import json, subprocess, sys, os
 
 channels = json.load(sys.stdin)
 registry = os.environ['REGISTRY']
 manager = os.environ['MANAGER']
+workdir_map_file = os.environ['WORKDIR_MAP_FILE']
+default_workdir = os.environ['DEFAULT_WORKDIR']
+
+# Load workdir map (graceful fallback if missing or invalid)
+workdir_map = {}
+try:
+    with open(workdir_map_file) as f:
+        workdir_map = json.load(f)
+except Exception:
+    pass
+
+def resolve_workdir(name):
+    path = workdir_map.get(name, '')
+    if path:
+        return os.path.expandvars(path)
+    return default_workdir
 
 with open(registry) as f:
     reg = json.load(f)
@@ -342,8 +388,13 @@ for ch in sorted(text_channels, key=lambda c: c.get('position', 0)):
     if cid in reg:
         print(f'  EXISTS  {name:25} ({cid})')
     else:
-        print(f'  NEW     {name:25} ({cid}) — spawning...')
-        subprocess.run([manager, 'spawn', cid, '--name', name], check=True)
+        wd = resolve_workdir(name)
+        wd_note = f'  workdir={wd}' if wd != default_workdir else ''
+        print(f'  NEW     {name:25} ({cid}) — spawning...{wd_note}')
+        cmd = [manager, 'spawn', cid, '--name', name]
+        if wd != default_workdir:
+            cmd += ['--workdir', wd]
+        subprocess.run(cmd, check=True)
         new_count += 1
 
 print(f'\nDiscovered {len(text_channels)} channels, spawned {new_count} new sessions')
@@ -359,13 +410,29 @@ cmd_discover_threads() {
 
   curl -sS -H "Authorization: Bot $token" \
     "https://discord.com/api/v10/guilds/${GUILD_ID}/threads/active" \
-  | REGISTRY="$SESSIONS_REGISTRY" MANAGER="$0" python3 -c "
+  | REGISTRY="$SESSIONS_REGISTRY" MANAGER="$0" WORKDIR_MAP_FILE="$WORKDIR_MAP" DEFAULT_WORKDIR="$WORKDIR" python3 -c "
 import json, subprocess, sys, os
 
 data = json.load(sys.stdin)
 threads = data.get('threads', [])
 registry = os.environ['REGISTRY']
 manager = os.environ['MANAGER']
+workdir_map_file = os.environ['WORKDIR_MAP_FILE']
+default_workdir = os.environ['DEFAULT_WORKDIR']
+
+# Load workdir map (graceful fallback if missing or invalid)
+workdir_map = {}
+try:
+    with open(workdir_map_file) as f:
+        workdir_map = json.load(f)
+except Exception:
+    pass
+
+def resolve_workdir(name):
+    path = workdir_map.get(name, '')
+    if path:
+        return os.path.expandvars(path)
+    return default_workdir
 
 with open(registry) as f:
     reg = json.load(f)
@@ -378,8 +445,13 @@ for t in sorted(threads, key=lambda x: x.get('name', '')):
     if tid in reg:
         print(f'  EXISTS  {name:30} ({tid})  parent={parent}')
     else:
-        print(f'  NEW     {name:30} ({tid})  parent={parent} — spawning...')
-        subprocess.run([manager, 'spawn-thread', tid, parent, '--name', name], check=True)
+        wd = resolve_workdir(name)
+        wd_note = f'  workdir={wd}' if wd != default_workdir else ''
+        print(f'  NEW     {name:30} ({tid})  parent={parent} — spawning...{wd_note}')
+        cmd = [manager, 'spawn-thread', tid, parent, '--name', name]
+        if wd != default_workdir:
+            cmd += ['--workdir', wd]
+        subprocess.run(cmd, check=True)
         new_count += 1
 
 print(f'\nDiscovered {len(threads)} active threads, spawned {new_count} new sessions')
@@ -483,6 +555,12 @@ Discord Session Manager — per-channel Claude Code sessions via tmux
   kill-all            Kill all Discord sessions
   respawn-dead        Respawn any DOWN sessions (used by watchdog)
   status              Overview
+
+Channel-to-workdir mapping:
+  Create ~/.claude/discord-sessions/workdir-map.json to map channel names
+  to project directories. discover and discover-threads will use the mapped
+  workdir when spawning new sessions. Example:
+    { "general": "$HOME/myproject", "health-os": "$HOME/apps/healthOS" }
 HELP
     ;;
   *) echo "Unknown: $1 (try --help)"; exit 1 ;;

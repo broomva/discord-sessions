@@ -148,6 +148,38 @@ it is a thread message. The session should:
 
 In practice, the watchdog handles this automatically via `discover-threads`.
 
+## Channel-to-Workdir Mapping
+
+By default, all sessions use the `DISCORD_SESSION_WORKDIR` from `config.env`. To assign
+different project directories to specific channels, create a mapping file:
+
+**File:** `~/.claude/discord-sessions/workdir-map.json`
+
+```json
+{
+  "general": "$HOME/myproject",
+  "health-os": "$HOME/myproject/apps/healthOS",
+  "life": "$HOME/myproject/core/life",
+  "design-system": "$HOME/myproject/apps/arcan-glass"
+}
+```
+
+**How it works:**
+
+- When `discover` or `discover-threads` spawns a new session, it looks up the channel/thread
+  name in `workdir-map.json`.
+- If a match is found, the session starts in that directory (with that project's CLAUDE.md chain).
+- If no match is found, the default `DISCORD_SESSION_WORKDIR` is used.
+- If the file does not exist, everything works as before — the feature is fully optional.
+- Environment variables in paths (like `$HOME`) are expanded automatically.
+
+You can also use `--workdir` on individual `spawn` / `spawn-thread` commands to override
+the mapping for a single session.
+
+**Tip:** After updating `workdir-map.json`, run `kill-all` then `discover-all` to re-spawn
+all sessions with the new workdir assignments. Existing sessions are not affected until
+they are killed and re-spawned.
+
 ## Architecture
 
 ```
