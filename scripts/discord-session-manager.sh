@@ -599,6 +599,45 @@ cmd_create_channel() {
   cmd_spawn "$channel_id" --name "$channel_name"
 }
 
+_count_active_sessions() {
+  _ensure_dirs
+  python3 -c "
+import json, subprocess
+with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
+count = sum(1 for info in reg.values()
+  if subprocess.run(['tmux', 'has-session', '-t', info['tmux']], capture_output=True).returncode == 0)
+print(count)
+"
+}
+
+cmd_motd() {
+  local up
+  up="$(_count_active_sessions)"
+  local total
+  total=$(python3 -c "import json; print(len(json.load(open('$SESSIONS_REGISTRY'))))" 2>/dev/null || echo 0)
+  echo "$up/$total sessions active | watchdog: $(./scripts/discord-watchdog.sh --status 2>/dev/null | head -1)"
+}
+
+cmd_set_channel_topic() {
+  local STATUS_CHANNEL_ID="${DISCORD_STATUS_CHANNEL_ID:-}"
+  [[ -z "$STATUS_CHANNEL_ID" ]] && return 0
+
+  _require_main_config
+  local token
+  token="$(_read_bot_token)"
+  local topic
+  topic="$(cmd_motd)"
+
+  local escaped_topic
+  escaped_topic=$(python3 -c "import json,sys; print(json.dumps('$topic'))")
+
+  curl -sS -X PATCH \
+    -H "Authorization: Bot $token" \
+    -H "Content-Type: application/json" \
+    -d "{\"topic\": $escaped_topic}" \
+    "https://discord.com/api/v10/channels/${STATUS_CHANNEL_ID}" > /dev/null 2>&1 || true
+}
+
 cmd_status() {
   echo "Discord Session Manager"
   echo "═══════════════════════"
@@ -650,6 +689,8 @@ case "${1:-help}" in
   discover-all)      cmd_discover; echo ""; cmd_discover_threads ;;
   cleanup-stale)     cmd_cleanup_stale ;;
   create-channel)    shift; cmd_create_channel "$@" ;;
+  motd)              cmd_motd ;;
+  set-status)        cmd_set_channel_topic ;;
   init)              cmd_init ;;
   list)              cmd_list ;;
   attach)            shift; cmd_attach "$@" ;;
@@ -669,6 +710,8 @@ Discord Session Manager — per-channel Claude Code sessions via tmux
   discover-all        Both channels + threads
   cleanup-stale       Kill sessions for deleted channels or archived threads
   create-channel <name>  Create a Discord channel + spawn its session
+  motd                Show active session count and watchdog status
+  set-status          Update the status channel topic with session count
   list                List sessions with UP/DOWN status
   attach <id>         Attach to a tmux session
   kill <id>           Kill and deregister a session

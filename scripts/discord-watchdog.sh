@@ -45,6 +45,8 @@ cmd_run() {
       "$MANAGER" discover-all 2>&1 | while read -r line; do
         [[ -n "$line" ]] && _log "$line"
       done
+      # Update status channel topic after discovery
+      "$MANAGER" set-status 2>/dev/null || true
       last_discover=$now
     fi
 
