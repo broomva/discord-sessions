@@ -85,7 +85,7 @@ with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
 reg['$id'] = {
     'type': '$type',
     'name': '$name',
-    'tmux': '$(_session_name "$id")',
+    'tmux': '$(echo $(_session_name $id))',
     'parent': '$parent' or None,
     'created': datetime.datetime.now().isoformat(timespec='seconds')
 }
@@ -146,6 +146,7 @@ except Exception:
   else
     echo "$WORKDIR"
   fi
+}
 
 # UUID v5 namespace for discord-sessions (fixed, generated once)
 _UUID_NAMESPACE="a1b2c3d4-e5f6-4789-abcd-ef0123456789"
