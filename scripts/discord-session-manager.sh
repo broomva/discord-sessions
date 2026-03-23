@@ -407,9 +407,30 @@ for cid, info in reg.items():
   done
 }
 
+_is_session_busy() {
+  # Check if a Claude Code session is actively working (not at the idle prompt)
+  # Returns 0 (true) if busy, 1 (false) if idle
+  local sn="$1"
+  local pane_content
+  pane_content=$(tmux capture-pane -t "$sn" -p 2>/dev/null | tail -5)
+
+  # If the pane shows the idle prompt (❯) with no active indicators, it's idle
+  # Active indicators: spinning, tool calls, "Churned", "Cooked", streaming text
+  if echo "$pane_content" | grep -qE '⏺|Churning|Cooking|streaming|Running|SPAWNED|RESPAWNING|Thinking'; then
+    return 0  # busy
+  fi
+  # Check if the last visible line is the idle prompt
+  if echo "$pane_content" | grep -q '❯'; then
+    return 1  # idle
+  fi
+  # Default: assume busy (safer — don't kill working sessions)
+  return 0
+}
+
 cmd_suspend_idle() {
   # Kill sessions that have been idle (no tmux activity) beyond the threshold
-  local idle_minutes="${DISCORD_IDLE_TIMEOUT:-30}"
+  # Two checks: (1) tmux pane_last_activity timestamp and (2) Claude is at idle prompt
+  local idle_minutes="${DISCORD_IDLE_TIMEOUT:-120}"
   local idle_seconds=$((idle_minutes * 60))
   _ensure_dirs
 
@@ -426,20 +447,26 @@ for cid, info in reg.items():
     if _is_alive "$cid"; then
       local sn
       sn="$(_session_name "$cid")"
-      # Get tmux pane last activity timestamp
-      local last_activity
-      last_activity=$(tmux display-message -t "$sn" -p '#{pane_last_activity}' 2>/dev/null || echo "$now")
-      local idle_for=$((now - last_activity))
 
+      # Skip pinned sessions
       if [[ -f "$(_state_dir "$cid")/.no-idle" ]]; then
         continue
       fi
+
+      # Check 1: Is the session actively working? Never suspend busy sessions.
+      if _is_session_busy "$sn"; then
+        continue
+      fi
+
+      # Check 2: Has enough idle time passed?
+      local last_activity
+      last_activity=$(tmux display-message -t "$sn" -p '#{pane_last_activity}' 2>/dev/null || echo "$now")
+      local idle_for=$((now - last_activity))
 
       if (( idle_for > idle_seconds )); then
         local idle_min=$((idle_for / 60))
         echo "  SUSPEND  ${name} (idle ${idle_min}m)"
         tmux kill-session -t "$sn" 2>/dev/null || true
-        # Mark as suspended so respawn-dead skips it
         echo "$now" > "$(_state_dir "$cid")/.suspended"
         suspended=$((suspended + 1))
       fi
