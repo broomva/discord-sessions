@@ -212,8 +212,11 @@ _spawn_tmux() {
   # Persist the session ID so respawns can resume the conversation
   _persist_session_id "$id" "$session_uuid"
 
-  # Unset API keys so sessions use Claude Max OAuth (required for --channels)
-  claude_cmd="unset ANTHROPIC_API_KEY CLAUDE_API_KEY; DISCORD_STATE_DIR='$state_dir' claude"
+  # Unset API keys, set OAuth token for --channels auth
+  local oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+  claude_cmd="unset ANTHROPIC_API_KEY CLAUDE_API_KEY;"
+  [[ -n "$oauth_token" ]] && claude_cmd+=" CLAUDE_CODE_OAUTH_TOKEN='$oauth_token'"
+  claude_cmd+=" DISCORD_STATE_DIR='$state_dir' claude"
   claude_cmd+=" --channels plugin:discord@claude-plugins-official"
   claude_cmd+=" --dangerously-skip-permissions"
   claude_cmd+=" --session-id '${session_uuid}'"
