@@ -4,7 +4,7 @@ Create a launchd plist to start the watchdog automatically on login.
 
 ## Template
 
-Save to `~/Library/LaunchAgents/com.discord-sessions.watchdog.plist`:
+Save to `~/Library/LaunchAgents/com.claude-remote-sessions.watchdog.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -12,7 +12,7 @@ Save to `~/Library/LaunchAgents/com.discord-sessions.watchdog.plist`:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.discord-sessions.watchdog</string>
+    <string>com.claude-remote-sessions.watchdog</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -38,7 +38,7 @@ Save to `~/Library/LaunchAgents/com.discord-sessions.watchdog.plist`:
 Replace `$HOME` and `$PROJECT_DIR` with actual paths. Then:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.discord-sessions.watchdog.plist
+launchctl load ~/Library/LaunchAgents/com.claude-remote-sessions.watchdog.plist
 ```
 
 ## Important
@@ -50,7 +50,7 @@ Check with `which tmux claude python3 curl` and add those directories.
 
 ```ini
 [Unit]
-Description=Discord Sessions Watchdog
+Description=Claude Remote Sessions Watchdog
 After=network.target
 
 [Service]

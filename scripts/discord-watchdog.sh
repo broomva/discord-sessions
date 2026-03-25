@@ -15,11 +15,22 @@ CONFIG_FILE="$SESSIONS_DIR/config.env"
 INTERVAL="${DISCORD_WATCHDOG_INTERVAL:-30}"
 DISCOVER_INTERVAL="${DISCORD_DISCOVER_INTERVAL:-60}"
 CLEANUP_INTERVAL="${DISCORD_CLEANUP_INTERVAL:-300}"
-MANAGER="$(cd "$(dirname "$0")" && pwd)/discord-session-manager.sh"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MANAGER="$SCRIPT_DIR/discord-session-manager.sh"
 TMUX_SESSION="dc-watchdog"
+SLASH_DAEMON_SESSION="dc-slash-daemon"
 PIDFILE="$SESSIONS_DIR/watchdog.pid"
 
 _log() { echo "[$(date +%H:%M:%S)] $*"; }
+
+_ensure_slash_daemon() {
+  if ! tmux has-session -t "$SLASH_DAEMON_SESSION" 2>/dev/null; then
+    _log "Slash daemon not running — spawning in tmux: $SLASH_DAEMON_SESSION"
+    tmux new-session -d -s "$SLASH_DAEMON_SESSION" -c "$SCRIPT_DIR" \
+      "bun $SCRIPT_DIR/discord-slash-daemon.ts"
+    _log "Slash daemon started"
+  fi
+}
 
 cmd_run() {
   _log "Watchdog started (interval=${INTERVAL}s, discover=${DISCOVER_INTERVAL}s, cleanup=${CLEANUP_INTERVAL}s, pid=$$)"
@@ -40,6 +51,9 @@ cmd_run() {
       done
     fi
 
+    # Ensure the slash command daemon is alive
+    _ensure_slash_daemon
+
     if (( now - last_discover >= DISCOVER_INTERVAL )); then
       _log "Discovering new channels and threads..."
       "$MANAGER" discover-all 2>&1 | while read -r line; do
@@ -51,8 +65,11 @@ cmd_run() {
     fi
 
     if (( now - last_cleanup >= CLEANUP_INTERVAL )); then
-      _log "Running stale session cleanup..."
+      _log "Running stale session cleanup + idle suspension..."
       "$MANAGER" cleanup-stale 2>&1 | while read -r line; do
+        [[ -n "$line" ]] && _log "$line"
+      done
+      "$MANAGER" suspend-idle 2>&1 | while read -r line; do
         [[ -n "$line" ]] && _log "$line"
       done
       last_cleanup=$now
@@ -83,6 +100,11 @@ cmd_stop() {
   else
     echo "Watchdog not running"
   fi
+  # Also stop the slash daemon if running
+  if tmux has-session -t "$SLASH_DAEMON_SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SLASH_DAEMON_SESSION"
+    echo "Slash daemon stopped"
+  fi
 }
 
 cmd_status() {
@@ -92,6 +114,11 @@ cmd_status() {
     echo "Watchdog: RUNNING (pid: $(cat "$PIDFILE"))"
   else
     echo "Watchdog: STOPPED"
+  fi
+  if tmux has-session -t "$SLASH_DAEMON_SESSION" 2>/dev/null; then
+    echo "Slash daemon: RUNNING (tmux: $SLASH_DAEMON_SESSION)"
+  else
+    echo "Slash daemon: STOPPED"
   fi
 }
 

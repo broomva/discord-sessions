@@ -25,6 +25,7 @@ _load_config
 
 ALLOWED_USER_ID="${DISCORD_ALLOWED_USER_ID:-}"
 GUILD_ID="${DISCORD_GUILD_ID:-}"
+WORKDIR_MAP="$SESSIONS_DIR/workdir-map.json"
 WORKDIR="${DISCORD_SESSION_WORKDIR:-$HOME}"
 
 _require_config() {
@@ -148,16 +149,8 @@ except Exception:
   fi
 }
 
-# UUID v5 namespace for discord-sessions (fixed, generated once)
-_UUID_NAMESPACE="a1b2c3d4-e5f6-4789-abcd-ef0123456789"
-
 _generate_session_id() {
-  local channel_id="$1"
-  python3 -c "
-import uuid
-ns = uuid.UUID('$_UUID_NAMESPACE')
-print(uuid.uuid5(ns, '$channel_id'))
-"
+  python3 -c "import uuid; print(uuid.uuid4())"
 }
 
 _persist_session_id() {
@@ -211,7 +204,11 @@ _spawn_tmux() {
   # Persist the session ID so respawns can resume the conversation
   _persist_session_id "$id" "$session_uuid"
 
-  claude_cmd="DISCORD_STATE_DIR='$state_dir' claude"
+  # Unset API keys, set OAuth token for --channels auth
+  local oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+  claude_cmd="unset ANTHROPIC_API_KEY CLAUDE_API_KEY;"
+  [[ -n "$oauth_token" ]] && claude_cmd+=" CLAUDE_CODE_OAUTH_TOKEN='$oauth_token'"
+  claude_cmd+=" DISCORD_STATE_DIR='$state_dir' claude"
   claude_cmd+=" --channels plugin:discord@claude-plugins-official"
   claude_cmd+=" --dangerously-skip-permissions"
   claude_cmd+=" --session-id '${session_uuid}'"
@@ -256,6 +253,11 @@ cmd_spawn() {
   local name="${label:-ch-${channel_id: -6}}"
   _ensure_state_dir "$channel_id"
 
+  # Resolve workdir from map if not explicitly passed
+  if [[ -z "$workdir" ]]; then
+    workdir="$(_resolve_workdir "$name")"
+  fi
+
   # --fresh: generate a new UUID to start a clean conversation
   local session_uuid=""
   if $fresh; then
@@ -266,7 +268,7 @@ cmd_spawn() {
   _spawn_tmux "$channel_id" "$name" "$system_prompt" "$workdir" "$session_uuid"
   _registry_set "$channel_id" "channel" "$name"
 
-  echo "SPAWNED  $(_session_name "$channel_id")  name=$name  workdir=${workdir:-$WORKDIR}"
+  echo "SPAWNED  $(_session_name "$channel_id")  name=$name  workdir=${workdir}"
 }
 
 cmd_spawn_thread() {
@@ -314,7 +316,15 @@ cfg['groups']['$parent_id'] = {'requireMention': False, 'allowFrom': []}
 with open(p, 'w') as f: json.dump(cfg, f, indent=2)
 "
 
-  # Thread sessions also get deterministic session IDs for resume on respawn
+  # Inherit workdir from parent channel session if not explicitly set
+  if [[ -z "$workdir" ]]; then
+    local parent_wd_file
+    parent_wd_file="$(_state_dir "$parent_id")/.workdir"
+    if [[ -f "$parent_wd_file" ]]; then
+      workdir="$(cat "$parent_wd_file")"
+    fi
+  fi
+
   _spawn_tmux "$thread_id" "$name" "$prompt" "$workdir" ""
   _registry_set "$thread_id" "thread" "$name" "$parent_id"
 
@@ -373,6 +383,10 @@ for cid, info in reg.items():
     print(f'{cid} {info[\"type\"]} {info[\"name\"]} {info.get(\"parent\") or \"-\"}')
 " | while IFS=' ' read -r cid type name parent; do
     if ! _is_alive "$cid"; then
+      # Skip suspended sessions
+      if [[ -f "$(_state_dir "$cid")/.suspended" ]]; then
+        continue
+      fi
       echo "RESPAWNING $(_session_name "$cid") ($type: $name)"
       _ensure_state_dir "$cid"
       local wd=""
@@ -392,6 +406,125 @@ for cid, info in reg.items():
       fi
     fi
   done
+}
+
+_is_session_busy() {
+  # Check if a Claude Code session is actively working (not at the idle prompt)
+  # Returns 0 (true) if busy, 1 (false) if idle
+  local sn="$1"
+  local pane_content
+  pane_content=$(tmux capture-pane -t "$sn" -p 2>/dev/null | tail -5)
+
+  # If the pane shows the idle prompt (❯) with no active indicators, it's idle
+  # Active indicators: spinning, tool calls, "Churned", "Cooked", streaming text
+  if echo "$pane_content" | grep -qE '⏺|Churning|Cooking|streaming|Running|SPAWNED|RESPAWNING|Thinking'; then
+    return 0  # busy
+  fi
+  # Check if the last visible line is the idle prompt
+  if echo "$pane_content" | grep -q '❯'; then
+    return 1  # idle
+  fi
+  # Default: assume busy (safer — don't kill working sessions)
+  return 0
+}
+
+cmd_suspend_idle() {
+  # Kill sessions that have been idle (no tmux activity) beyond the threshold
+  # Two checks: (1) tmux pane_last_activity timestamp and (2) Claude is at idle prompt
+  local idle_minutes="${DISCORD_IDLE_TIMEOUT:-120}"
+  local idle_seconds=$((idle_minutes * 60))
+  _ensure_dirs
+
+  local suspended=0
+  local now
+  now=$(date +%s)
+
+  python3 -c "
+import json
+with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
+for cid, info in reg.items():
+    print(f'{cid} {info[\"name\"]}')
+" | while IFS=' ' read -r cid name; do
+    if _is_alive "$cid"; then
+      local sn
+      sn="$(_session_name "$cid")"
+
+      # Skip pinned sessions
+      if [[ -f "$(_state_dir "$cid")/.no-idle" ]]; then
+        continue
+      fi
+
+      # Check 1: Is the session actively working? Never suspend busy sessions.
+      if _is_session_busy "$sn"; then
+        continue
+      fi
+
+      # Check 2: Has enough idle time passed?
+      local last_activity
+      last_activity=$(tmux display-message -t "$sn" -p '#{pane_last_activity}' 2>/dev/null || echo "$now")
+      local idle_for=$((now - last_activity))
+
+      if (( idle_for > idle_seconds )); then
+        local idle_min=$((idle_for / 60))
+        echo "  SUSPEND  ${name} (idle ${idle_min}m)"
+        tmux kill-session -t "$sn" 2>/dev/null || true
+        echo "$now" > "$(_state_dir "$cid")/.suspended"
+        suspended=$((suspended + 1))
+      fi
+    fi
+  done
+  echo "Suspended $suspended sessions (threshold: ${idle_minutes}m)"
+}
+
+cmd_wake() {
+  # Wake a specific suspended session
+  local id="${1:?Usage: wake <channel_id>}"
+  local suspend_file
+  suspend_file="$(_state_dir "$id")/.suspended"
+  [[ -f "$suspend_file" ]] && rm -f "$suspend_file"
+
+  if ! _is_alive "$id"; then
+    # Trigger respawn
+    local name="" wd="" session_uuid=""
+    name=$(python3 -c "
+import json
+with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
+print(reg.get('$id', {}).get('name', 'unknown'))
+" 2>/dev/null)
+    [[ -f "$(_state_dir "$id")/.workdir" ]] && wd="$(cat "$(_state_dir "$id")/.workdir")"
+    session_uuid="$(_read_session_id "$id")"
+    _ensure_state_dir "$id"
+    _spawn_tmux "$id" "$name" "" "$wd" "$session_uuid"
+    echo "WOKE  $(_session_name "$id")  name=$name"
+  else
+    echo "ALIVE  $(_session_name "$id") (not suspended)"
+  fi
+}
+
+cmd_wake_all() {
+  _ensure_dirs
+  local woke=0
+  for sf in "$SESSIONS_DIR"/*/.suspended; do
+    [[ -f "$sf" ]] || continue
+    local cid
+    cid=$(basename "$(dirname "$sf")")
+    rm -f "$sf"
+    woke=$((woke + 1))
+  done
+  echo "Cleared $woke suspend flags. Run respawn-dead to bring them back."
+  cmd_respawn_dead
+}
+
+cmd_pin() {
+  local id="${1:?Usage: pin <channel_id>}"
+  touch "$(_state_dir "$id")/.no-idle"
+  echo "PINNED  $(_session_name "$id") — will not be suspended"
+}
+
+cmd_unpin() {
+  local id="${1:?Usage: unpin <channel_id>}"
+  rm -f "$(_state_dir "$id")/.no-idle"
+  echo "UNPINNED  $(_session_name "$id")"
 }
 
 cmd_cleanup_stale() {
@@ -577,8 +710,32 @@ print(f'\nDiscovered {len(threads)} active threads, spawned {new_count} new sess
 "
 }
 
+_update_workdir_map() {
+  # Add or update a channel name → workdir entry in workdir-map.json
+  local name="$1" workdir="$2"
+  [[ -z "$name" || -z "$workdir" ]] && return 0
+  python3 -c "
+import json, os
+path = '$WORKDIR_MAP'
+try:
+    with open(path) as f: m = json.load(f)
+except Exception:
+    m = {}
+m['$name'] = '$workdir'
+with open(path, 'w') as f: json.dump(m, f, indent=2)
+" 2>/dev/null || true
+}
+
 cmd_create_channel() {
-  local name="${1:?Usage: create-channel <name>}"
+  local name="" workdir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --workdir) workdir="$2"; shift 2 ;;
+      *)         name="$1"; shift ;;
+    esac
+  done
+  [[ -n "$name" ]] || { echo "Usage: create-channel <name> [--workdir <path>]"; exit 1; }
+
   _require_main_config
   _require_config
   local token
@@ -596,8 +753,17 @@ cmd_create_channel() {
   channel_id="${result%% *}"
   channel_name="${result#* }"
 
-  echo "CREATED  #$channel_name ($channel_id)"
-  cmd_spawn "$channel_id" --name "$channel_name"
+  # Update workdir map if workdir specified
+  if [[ -n "$workdir" ]]; then
+    _update_workdir_map "$channel_name" "$workdir"
+    echo "CREATED  #$channel_name ($channel_id)  workdir=$workdir"
+    cmd_spawn "$channel_id" --name "$channel_name" --workdir "$workdir"
+  else
+    local resolved
+    resolved="$(_resolve_workdir "$channel_name")"
+    echo "CREATED  #$channel_name ($channel_id)  workdir=$resolved"
+    cmd_spawn "$channel_id" --name "$channel_name" --workdir "$resolved"
+  fi
 }
 
 _count_active_sessions() {
@@ -689,6 +855,11 @@ case "${1:-help}" in
   discover-threads)  cmd_discover_threads ;;
   discover-all)      cmd_discover; echo ""; cmd_discover_threads ;;
   cleanup-stale)     cmd_cleanup_stale ;;
+  suspend-idle)      cmd_suspend_idle ;;
+  wake)              shift; cmd_wake "$@" ;;
+  wake-all)          cmd_wake_all ;;
+  pin)               shift; cmd_pin "$@" ;;
+  unpin)             shift; cmd_unpin "$@" ;;
   create-channel)    shift; cmd_create_channel "$@" ;;
   motd)              cmd_motd ;;
   set-status)        cmd_set_channel_topic ;;
@@ -710,7 +881,12 @@ Discord Session Manager — per-channel Claude Code sessions via tmux
   discover-threads    Auto-detect active threads and spawn sessions
   discover-all        Both channels + threads
   cleanup-stale       Kill sessions for deleted channels or archived threads
-  create-channel <name>  Create a Discord channel + spawn its session
+  suspend-idle        Suspend sessions idle beyond DISCORD_IDLE_TIMEOUT (default: 30m)
+  wake <id>           Wake a suspended session
+  wake-all            Wake all suspended sessions
+  pin <id>            Pin a session — never suspend it
+  unpin <id>          Unpin — allow idle suspension again
+  create-channel <name> [--workdir <path>]  Create a Discord channel + spawn its session
   motd                Show active session count and watchdog status
   set-status          Update the status channel topic with session count
   list                List sessions with UP/DOWN status

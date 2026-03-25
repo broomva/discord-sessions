@@ -1,22 +1,24 @@
 ---
-name: discord-sessions
+name: claude-remote-sessions
 description: >
-  Per-channel Discord sessions for Claude Code — each Discord channel or thread gets its
-  own isolated Claude Code session via tmux, with per-channel access control, project-specific
-  workdirs, and automatic CLAUDE.md chain loading. Includes a session manager (spawn, kill,
-  discover, create-channel, cleanup-stale), a watchdog daemon (auto-respawn every 30s,
-  auto-discover new channels/threads every 60s, stale cleanup every 5m), thread context
-  injection from parent channels, and launchd boot persistence. Use when: (1) setting up
-  per-channel Discord sessions for Claude Code, (2) managing multiple Claude Code sessions
-  across Discord channels, (3) auto-discovering new Discord channels or threads,
-  (4) spawning thread sessions with parent conversation context, (5) keeping Discord agent
-  sessions alive with a watchdog, (6) cleaning up stale sessions for deleted/archived
-  channels, (7) user says "discord sessions", "per-channel discord", "discord watchdog",
-  "spawn discord session", "discord channel session", "discord thread session",
-  "cleanup stale sessions".
+  Per-channel remote sessions for Claude Code via Discord and Telegram — each channel,
+  thread, or chat gets its own isolated Claude Code session via tmux, with per-channel
+  access control, project-specific workdirs, and automatic CLAUDE.md chain loading.
+  Includes session managers for Discord (spawn, kill, discover, create-channel, cleanup-stale)
+  and Telegram (spawn, kill, respawn), watchdog daemons (auto-respawn every 30s, auto-discover
+  new channels/threads every 60s, stale cleanup every 5m), thread context injection from
+  parent channels, session resume via deterministic UUIDs, workdir mapping, bot status
+  channel topic updates, and launchd boot persistence. Use when: (1) setting up per-channel
+  Discord or Telegram sessions for Claude Code, (2) managing multiple Claude Code sessions
+  across messaging channels, (3) auto-discovering new Discord channels or threads,
+  (4) spawning thread sessions with parent conversation context, (5) keeping remote agent
+  sessions alive with a watchdog, (6) cleaning up stale sessions, (7) setting up Telegram
+  per-chat sessions, (8) user says "remote sessions", "discord sessions", "telegram sessions",
+  "per-channel discord", "discord watchdog", "telegram watchdog", "spawn discord session",
+  "spawn telegram session", "claude remote", "channel session", "thread session".
 ---
 
-# Discord Sessions
+# Claude Remote Sessions
 
 Each Discord channel or thread maps to its own independent Claude Code session running
 in a tmux pane. Discord messaging is handled natively by the MCP plugin inside each
@@ -224,6 +226,78 @@ the mapping for a single session.
 all sessions with the new workdir assignments. Existing sessions are not affected until
 they are killed and re-spawned.
 
+## Slash Commands
+
+The slash command daemon provides Discord-native `/command` interaction for managing
+sessions without leaving the chat interface.
+
+### Starting the Daemon
+
+The watchdog automatically manages the slash daemon. When the watchdog runs, it checks
+for the `dc-slash-daemon` tmux session and spawns it if missing.
+
+```bash
+# Manual start (standalone)
+cd scripts && bun discord-slash-daemon.ts
+
+# Or let the watchdog handle it
+./scripts/discord-watchdog.sh --daemon
+```
+
+### Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `/session status` | Show session info (workdir, uptime, name, tmux session) as an embed |
+| `/session restart` | Kill + respawn the session. Use `fresh: true` for a clean conversation |
+| `/session refresh` | Kill + respawn with the same session-id (picks up new skills/CLAUDE.md) |
+| `/session kill` | Kill the session |
+| `/session wake` | Wake a suspended session |
+| `/session workdir [path]` | Show current workdir, or change it (kills + respawns with new workdir) |
+| `/skills list` | List installed skills for the channel's session |
+| `/skills install <name>` | Install a skill via `npx skills add` in the session |
+| `/discover` | Trigger channel/thread discovery |
+| `/ask <prompt>` | Send a prompt to the channel's Claude session |
+
+### Autocomplete
+
+The `/session workdir` command supports autocomplete. It reads entries from
+`~/.claude/discord-sessions/workdir-map.json` and suggests matching paths as
+the user types.
+
+### Skills Install + Refresh
+
+`/skills install <name>` sends the install command directly to the tmux session.
+After installation completes, use `/session refresh` to kill and respawn the session
+so it picks up the newly installed skill.
+
+### Registering Commands
+
+Commands are registered automatically when the daemon starts. To register or update
+commands without running the full daemon:
+
+```bash
+bun scripts/register-slash-commands.ts           # Register/update commands
+bun scripts/register-slash-commands.ts --clear    # Remove all guild commands
+```
+
+### Adding Custom Commands
+
+1. Add the command definition to the `SLASH_COMMANDS` array in `discord-slash-daemon.ts`
+2. Add a handler function (`handleYourCommand`)
+3. Add the routing case in `handleInteraction`
+4. Run `bun scripts/register-slash-commands.ts` to update Discord
+5. Restart the daemon (or let the watchdog cycle pick it up)
+
+### Prerequisites
+
+The daemon requires:
+- `bun` runtime
+- `discord.js` v14 (install: `cd scripts && bun install`)
+- Bot token at `~/.claude/channels/discord/.env`
+- Guild ID in `~/.claude/discord-sessions/config.env`
+- The bot must have the `applications.commands` scope in the guild
+
 ## Architecture
 
 ```
@@ -231,4 +305,5 @@ Discord #general   →  tmux: dc-<a>  →  Claude Code (workdir A, CLAUDE.md cha
 Discord #project-x →  tmux: dc-<b>  →  Claude Code (workdir B, CLAUDE.md chain B)
 Thread: "design"   →  tmux: dc-<c>  →  Claude Code (parent context injected)
                       dc-watchdog    →  Respawns dead + discovers new + cleans stale
+                      dc-slash-daemon → Handles /session, /skills, /ask, /discover
 ```
