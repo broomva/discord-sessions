@@ -363,7 +363,12 @@ const SLASH_COMMANDS = [
       },
       {
         name: "snapshot",
-        description: "Dump full session output as a scrollable text file",
+        description: "Current pane view as a scrollable text file",
+        type: ApplicationCommandOptionType.Subcommand,
+      },
+      {
+        name: "history",
+        description: "Full session scrollback (entire conversation) as a text file",
         type: ApplicationCommandOptionType.Subcommand,
       },
     ],
@@ -1211,6 +1216,57 @@ async function handleSessionSnapshot(
   return JSON.stringify({ __snapshot: true, name: session.name, content: cleaned });
 }
 
+async function handleSessionHistory(
+  interaction: ChatInputCommandInteraction
+): Promise<string> {
+  const channelId = interaction.channelId;
+  const session = findSessionByChannel(channelId);
+  if (!session) {
+    return "No session registered for this channel. Try `/discover` first.";
+  }
+
+  const alive = await isTmuxAlive(session.tmux);
+  if (!alive) {
+    return `Session \`${session.tmux}\` is not running.`;
+  }
+
+  // Capture the ENTIRE scrollback buffer
+  let paneText = "";
+  try {
+    await $`tmux resize-window -t ${session.tmux} -x 220`.nothrow().quiet();
+    // -S - = from the very start, -E - = to the very end
+    paneText = await $`tmux capture-pane -t ${session.tmux} -p -J -S - -E -`.text();
+  } catch {
+    return "Failed to capture session history.";
+  }
+
+  // Strip TUI chrome from bottom
+  const lines = paneText.split("\n");
+  while (lines.length) {
+    const last = lines[lines.length - 1].trim();
+    if (
+      !last ||
+      last.match(/^[─━═▔▁_]{3,}$/) ||
+      last.match(/^[❯>]\s*$/) ||
+      last.match(/bypass permissions/) ||
+      last.match(/auto-compact/) ||
+      last.match(/shift\+tab/) ||
+      last.match(/esc to interrupt/) ||
+      last.match(/hold Space/)
+    ) {
+      lines.pop();
+    } else {
+      break;
+    }
+  }
+  while (lines.length && !lines[0].trim()) lines.shift();
+
+  const cleaned = lines.join("\n").trimEnd();
+  if (!cleaned) return "Session history is empty.";
+
+  return JSON.stringify({ __snapshot: true, name: `${session.name}-history`, content: cleaned });
+}
+
 async function handleSessionWatch(
   interaction: ChatInputCommandInteraction
 ): Promise<string> {
@@ -1448,6 +1504,9 @@ async function handleInteraction(
             break;
           case "snapshot":
             response = await handleSessionSnapshot(interaction);
+            break;
+          case "history":
+            response = await handleSessionHistory(interaction);
             break;
           default:
             response = `Unknown subcommand: ${sub}`;

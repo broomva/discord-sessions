@@ -113,7 +113,12 @@ const SLASH_COMMANDS = [
       },
       {
         name: "snapshot",
-        description: "Dump full session output as a scrollable text file",
+        description: "Current pane view as a scrollable text file",
+        type: ApplicationCommandOptionType.Subcommand,
+      },
+      {
+        name: "history",
+        description: "Full session scrollback (entire conversation) as a text file",
         type: ApplicationCommandOptionType.Subcommand,
       },
     ],
