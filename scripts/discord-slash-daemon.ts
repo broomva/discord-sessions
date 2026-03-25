@@ -1105,13 +1105,27 @@ async function watchTick(state: WatchState): Promise<void> {
   state.lastContent = raw;
   state.idleCount = 0;
 
-  // Clean up the pane text: strip empty lines from top, keep content
-  const cleanedLines = raw.split("\n");
-  // Remove leading blank lines
-  while (cleanedLines.length && !cleanedLines[0].trim()) cleanedLines.shift();
-  const paneText = cleanedLines.join("\n").trimEnd();
+  // Build code block from the tail of the pane that fits in Discord's limit
+  const elapsed = Math.round((Date.now() - state.startedAt) / 1000);
+  const header = `**${state.sessionName}** — working (${elapsed}s)\n`;
+  const maxBody = 2000 - header.length - 10; // 10 for ``` markers + newlines
 
-  await editWatchMessage(state, "", paneText);
+  // Take lines from the bottom (most recent), fitting within limit
+  const allLines = raw.split("\n");
+  // Strip leading blank lines
+  while (allLines.length && !allLines[0].trim()) allLines.shift();
+
+  const display: string[] = [];
+  let bodyLen = 0;
+  for (let i = allLines.length - 1; i >= 0; i--) {
+    const line = allLines[i];
+    if (bodyLen + line.length + 1 > maxBody) break;
+    display.unshift(line);
+    bodyLen += line.length + 1;
+  }
+
+  const content = `${header}\`\`\`\n${display.join("\n")}\n\`\`\``;
+  await editWatchMessage(state, content);
 }
 
 function stopWatch(channelId: string, reason: string): void {
