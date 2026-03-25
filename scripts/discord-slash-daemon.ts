@@ -134,12 +134,10 @@ async function readSessionId(channelId: string): Promise<string> {
 }
 
 async function runManager(...args: string[]): Promise<string> {
-  try {
-    const result = await $`bash ${MANAGER_PATH} ${args}`.text();
-    return result.trim();
-  } catch (e: any) {
-    return e?.stdout?.toString()?.trim() || e?.message || "Command failed";
-  }
+  const result = await $`bash ${MANAGER_PATH} ${args}`.nothrow().quiet();
+  const out = result.stdout?.toString()?.trim();
+  const err = result.stderr?.toString()?.trim();
+  return out || err || (result.exitCode === 0 ? "OK" : "Command failed");
 }
 
 function escapeForTmux(input: string): string {
