@@ -121,6 +121,20 @@ const SLASH_COMMANDS = [
         description: "Full session scrollback (entire conversation) as a text file",
         type: ApplicationCommandOptionType.Subcommand,
       },
+      {
+        name: "send",
+        description: "Send a keypress or text to the session (for prompts, approvals, feedback)",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "input",
+            description: "Text to send, or a key: yes, no, esc, enter, tab, up, down, 1, 2, 3",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+            autocomplete: true,
+          },
+        ],
+      },
     ],
   },
   {

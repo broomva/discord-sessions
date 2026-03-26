@@ -369,6 +369,20 @@ const SLASH_COMMANDS = [
         description: "Full session scrollback (entire conversation) as a text file",
         type: ApplicationCommandOptionType.Subcommand,
       },
+      {
+        name: "send",
+        description: "Send a keypress or text to the session (for prompts, approvals, feedback)",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "input",
+            description: "Text to send, or a key: yes, no, esc, enter, tab, up, down, 1, 2, 3",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+            autocomplete: true,
+          },
+        ],
+      },
     ],
   },
   {
@@ -1265,6 +1279,64 @@ async function handleSessionHistory(
   return JSON.stringify({ __snapshot: true, name: `${session.name}-history`, content: cleaned });
 }
 
+// Map friendly names to tmux key sequences
+const KEY_MAP: Record<string, string> = {
+  yes: "y",
+  no: "n",
+  esc: "Escape",
+  escape: "Escape",
+  enter: "Enter",
+  tab: "Tab",
+  up: "Up",
+  down: "Down",
+  left: "Left",
+  right: "Right",
+  space: "Space",
+  "shift+tab": "BTab",
+  "ctrl+c": "C-c",
+  "ctrl+d": "C-d",
+};
+
+async function handleSessionSend(
+  interaction: ChatInputCommandInteraction
+): Promise<string> {
+  const channelId = interaction.channelId;
+  const session = findSessionByChannel(channelId);
+  if (!session) {
+    return "No session registered for this channel. Try `/discover` first.";
+  }
+
+  const alive = await isTmuxAlive(session.tmux);
+  if (!alive) {
+    return `Session \`${session.tmux}\` is not running.`;
+  }
+
+  const rawInput = interaction.options.getString("input", true);
+  const lower = rawInput.toLowerCase().trim();
+
+  // Check if it's a special key
+  const mappedKey = KEY_MAP[lower];
+
+  try {
+    if (mappedKey) {
+      // Send as a tmux key
+      await $`tmux send-keys -t ${session.tmux} ${mappedKey}`.quiet();
+      return `Sent key \`${lower}\` → \`${mappedKey}\` to session \`${session.name}\``;
+    } else if (lower === "1" || lower === "2" || lower === "3") {
+      // Numeric choice — send the number + Enter
+      await $`tmux send-keys -t ${session.tmux} ${lower} Enter`.quiet();
+      return `Sent choice \`${lower}\` to session \`${session.name}\``;
+    } else {
+      // Send as text + Enter
+      const escaped = escapeForTmux(rawInput);
+      await $`tmux send-keys -t ${session.tmux} ${escaped} Enter`.quiet();
+      return `Sent text to session \`${session.name}\`:\n> ${rawInput.length > 200 ? rawInput.slice(0, 200) + "..." : rawInput}`;
+    }
+  } catch (e: any) {
+    return `Failed to send: ${e.message}`;
+  }
+}
+
 async function handleSessionWatch(
   interaction: ChatInputCommandInteraction
 ): Promise<string> {
@@ -1452,6 +1524,32 @@ async function handleAutocomplete(
       const choices = [...projectMatches, ...globalMatches].slice(0, 25);
       await interaction.respond(choices);
     }
+  } else if (
+    interaction.commandName === "session" &&
+    focused.name === "input"
+  ) {
+    const typed = (focused.value as string).toLowerCase().trim();
+    const commonChoices = [
+      { name: "1 — Select option 1 (Yes)", value: "1" },
+      { name: "2 — Select option 2 (Yes, allow all)", value: "2" },
+      { name: "3 — Select option 3 (No)", value: "3" },
+      { name: "yes — Confirm / approve", value: "yes" },
+      { name: "no — Reject / deny", value: "no" },
+      { name: "enter — Press Enter", value: "enter" },
+      { name: "esc — Cancel / dismiss", value: "esc" },
+      { name: "tab — Next option", value: "tab" },
+      { name: "shift+tab — Toggle permissions mode", value: "shift+tab" },
+      { name: "up — Navigate up", value: "up" },
+      { name: "down — Navigate down", value: "down" },
+      { name: "space — Select / toggle", value: "space" },
+      { name: "ctrl+c — Interrupt", value: "ctrl+c" },
+    ];
+
+    const filtered = typed
+      ? commonChoices.filter((c) => c.name.toLowerCase().includes(typed) || c.value.includes(typed))
+      : commonChoices;
+
+    await interaction.respond(filtered.slice(0, 25));
   }
 }
 
@@ -1505,6 +1603,9 @@ async function handleInteraction(
             break;
           case "history":
             response = await handleSessionHistory(interaction);
+            break;
+          case "send":
+            response = await handleSessionSend(interaction);
             break;
           default:
             response = `Unknown subcommand: ${sub}`;
