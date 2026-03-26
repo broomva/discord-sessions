@@ -1388,6 +1388,18 @@ async function startAutoWatch(channelId: string, mode: WatchMode = "live"): Prom
   const session = findSessionByChannel(channelId);
   if (!session) return;
 
+  // Don't auto-start watch on a parent channel if any of its threads have active watches
+  // (thread messages leak to parent's plugin session — would show duplicate activity)
+  if (session.type === "channel") {
+    const registry = readSessionsRegistry();
+    for (const [id, info] of Object.entries(registry)) {
+      if ((info as any).parent === channelId && activeWatches.has(id)) {
+        console.log(`[watcher] Skipping auto-watch for parent ${channelId} — thread ${id} is being watched`);
+        return;
+      }
+    }
+  }
+
   try {
     const channel = await _discordClient.channels.fetch(channelId);
     if (!channel?.isTextBased()) return;
@@ -1784,22 +1796,37 @@ async function main() {
   // Auto-start watch + bump to bottom when user sends a message
   client.on("messageCreate", async (message) => {
     if (message.author.bot) return;
-    const channelId = message.channelId;
 
-    // If already watching, just bump to bottom
+    // Use the exact channel/thread ID the message was posted in
+    const channelId = message.channelId;
+    const isThread = message.channel.isThread();
+    const parentId = isThread ? (message.channel as any).parentId : null;
+
+    // If already watching this exact channel/thread, just bump to bottom
     const watch = activeWatches.get(channelId);
     if (watch) {
       setTimeout(() => bumpWatchToBottom(watch), 1500);
       return;
     }
 
-    // Auto-start watch if this channel has a registered session
+    // Auto-start watch for the channel/thread where the message was posted
     const session = findSessionByChannel(channelId);
     if (session) {
       const alive = await isTmuxAlive(session.tmux);
       if (alive) {
-        // Small delay to let the Claude session start processing
         setTimeout(() => startAutoWatch(channelId), 3000);
+      }
+    }
+
+    // If this is a thread message, do NOT also trigger the parent channel's watch.
+    // The parent's Discord plugin session may pick up the message, but we don't
+    // want the parent's watch to show thread activity.
+    if (isThread && parentId) {
+      const parentWatch = activeWatches.get(parentId);
+      if (parentWatch) {
+        // Parent watch is active but this message is in a thread — ignore
+        // (don't bump parent to bottom for thread messages)
+        return;
       }
     }
   });
