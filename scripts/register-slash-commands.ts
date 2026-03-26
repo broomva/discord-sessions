@@ -135,6 +135,20 @@ const SLASH_COMMANDS = [
           },
         ],
       },
+      {
+        name: "profile",
+        description: "Show or switch the auth profile for this channel",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "name",
+            description: "Profile to switch to (leave empty to show current)",
+            type: ApplicationCommandOptionType.String,
+            required: false,
+            autocomplete: true,
+          },
+        ],
+      },
     ],
   },
   {

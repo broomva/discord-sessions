@@ -133,6 +133,14 @@ async function readSessionId(channelId: string): Promise<string> {
   return "(none)";
 }
 
+function readProfile(channelId: string): string {
+  const profileFile = join(SESSIONS_DIR, channelId, ".profile");
+  try {
+    if (existsSync(profileFile)) return readFileSync(profileFile, "utf8").trim();
+  } catch {}
+  return "default";
+}
+
 async function runManager(...args: string[]): Promise<string> {
   const result = await $`bash ${MANAGER_PATH} ${args}`.nothrow().quiet();
   const out = result.stdout?.toString()?.trim();
@@ -383,6 +391,20 @@ const SLASH_COMMANDS = [
           },
         ],
       },
+      {
+        name: "profile",
+        description: "Show or switch the auth profile for this channel",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "name",
+            description: "Profile to switch to (leave empty to show current)",
+            type: ApplicationCommandOptionType.String,
+            required: false,
+            autocomplete: true,
+          },
+        ],
+      },
     ],
   },
   {
@@ -465,6 +487,7 @@ async function handleSessionStatus(
   const alive = await isTmuxAlive(session.tmux);
   const workdir = await readWorkdir(channelId);
   const sessionId = await readSessionId(channelId);
+  const profile = readProfile(channelId);
   const uptime = formatUptime(session.created);
   const isSuspended = existsSync(
     join(SESSIONS_DIR, channelId, ".suspended")
@@ -479,6 +502,7 @@ async function handleSessionStatus(
     .addFields(
       { name: "Status", value: status, inline: true },
       { name: "Type", value: session.type, inline: true },
+      { name: "Profile", value: `\`${profile}\``, inline: true },
       { name: "Uptime", value: uptime, inline: true },
       { name: "tmux", value: `\`${session.tmux}\``, inline: true },
       { name: "Session ID", value: `\`${sessionId.slice(0, 8)}...\``, inline: true },
@@ -618,6 +642,76 @@ async function handleSessionWorkdir(
     newPath
   );
   return `Workdir changed to \`${newPath}\`. Session respawned.\n\`\`\`\n${output}\n\`\`\``;
+}
+
+function readChannelProfiles(): Record<string, string> {
+  const cpFile = join(SESSIONS_DIR, "channel-profiles.json");
+  try {
+    if (existsSync(cpFile)) return JSON.parse(readFileSync(cpFile, "utf8"));
+  } catch {}
+  return {};
+}
+
+function listAvailableProfiles(): string[] {
+  const profilesFile = join(SESSIONS_DIR, "profiles.env");
+  try {
+    if (!existsSync(profilesFile)) return ["default"];
+    const content = readFileSync(profilesFile, "utf8");
+    const profiles: string[] = ["default"];
+    for (const line of content.split("\n")) {
+      const m = line.match(/^\[(.+)\]$/);
+      if (m && m[1] !== "default") profiles.push(m[1]);
+    }
+    return profiles;
+  } catch {
+    return ["default"];
+  }
+}
+
+function writeChannelProfiles(profiles: Record<string, string>): void {
+  const cpFile = join(SESSIONS_DIR, "channel-profiles.json");
+  writeFileSync(cpFile, JSON.stringify(profiles, null, 2) + "\n");
+}
+
+async function handleSessionProfile(
+  interaction: ChatInputCommandInteraction
+): Promise<string> {
+  const channelId = interaction.channelId;
+  const session = findSessionByChannel(channelId);
+  if (!session) {
+    return "No session registered for this channel. Try `/discover` first.";
+  }
+
+  const newProfile = interaction.options.getString("name");
+
+  if (!newProfile) {
+    // Show current profile and available profiles
+    const current = readProfile(channelId);
+    const available = listAvailableProfiles();
+    return `Current profile: \`${current}\`\nAvailable: ${available.map(p => `\`${p}\``).join(", ")}\n\nUse \`/session profile name:<profile>\` to switch.`;
+  }
+
+  // Validate profile exists
+  const available = listAvailableProfiles();
+  if (!available.includes(newProfile)) {
+    return `Profile \`${newProfile}\` not found. Available: ${available.map(p => `\`${p}\``).join(", ")}`;
+  }
+
+  // Update channel-profiles.json
+  const channelProfiles = readChannelProfiles();
+  channelProfiles[session.name] = newProfile;
+  writeChannelProfiles(channelProfiles);
+
+  // Kill + respawn with same session-id (preserves history)
+  await runManager("kill", channelId);
+  // Don't clear session-id — we want to preserve conversation history
+  const output = await runManager(
+    "spawn",
+    channelId,
+    "--name",
+    session.name
+  );
+  return `Profile switched to \`${newProfile}\`. Session respawned with same history.\n\`\`\`\n${output}\n\`\`\``;
 }
 
 async function handleSkillsList(
@@ -1576,6 +1670,23 @@ async function handleAutocomplete(
       : commonChoices;
 
     await interaction.respond(filtered.slice(0, 25));
+  } else if (
+    interaction.commandName === "session" &&
+    focused.name === "name" &&
+    interaction.options.getSubcommand() === "profile"
+  ) {
+    const typed = (focused.value as string).toLowerCase().trim();
+    const profiles = listAvailableProfiles();
+    const current = readProfile(interaction.channelId);
+
+    const choices = profiles
+      .filter((p) => !typed || p.toLowerCase().includes(typed))
+      .map((p) => ({
+        name: `${p}${p === current ? " (current)" : ""}`,
+        value: p,
+      }));
+
+    await interaction.respond(choices.slice(0, 25));
   }
 }
 
@@ -1632,6 +1743,9 @@ async function handleInteraction(
             break;
           case "send":
             response = await handleSessionSend(interaction);
+            break;
+          case "profile":
+            response = await handleSessionProfile(interaction);
             break;
           default:
             response = `Unknown subcommand: ${sub}`;

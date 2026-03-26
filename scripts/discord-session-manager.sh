@@ -12,6 +12,8 @@ SESSIONS_REGISTRY="$SESSIONS_DIR/sessions.json"
 SESSIONS_MD="$SESSIONS_DIR/SESSIONS.md"
 CONFIG_FILE="$SESSIONS_DIR/config.env"
 WORKDIR_MAP="$SESSIONS_DIR/workdir-map.json"
+PROFILES_FILE="$SESSIONS_DIR/profiles.env"
+CHANNEL_PROFILES="$SESSIONS_DIR/channel-profiles.json"
 TMUX_PREFIX="dc"
 
 # ── Load config ──────────────────────────────────────────────────────────
@@ -149,6 +151,64 @@ except Exception:
   fi
 }
 
+_resolve_profile() {
+  # Given a channel name, return the profile name (or "default")
+  local name="$1"
+  if [[ -z "$name" || ! -f "$CHANNEL_PROFILES" ]]; then
+    echo "default"
+    return
+  fi
+  local profile
+  profile=$(python3 -c "
+import json
+try:
+    with open('$CHANNEL_PROFILES') as f:
+        m = json.load(f)
+    print(m.get('$name', 'default'))
+except Exception:
+    print('default')
+" 2>/dev/null) || profile="default"
+  echo "$profile"
+}
+
+_load_profile_env() {
+  # Parse INI-style profiles.env and return env vars for a given profile
+  # Output: KEY=VALUE lines (default section merged with profile-specific)
+  local profile="$1"
+  if [[ ! -f "$PROFILES_FILE" ]]; then
+    return
+  fi
+  python3 -c "
+import re
+profile = '$profile'
+current_section = None
+vars_by_section = {}
+with open('$PROFILES_FILE') as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        m = re.match(r'^\[(.+)\]$', line)
+        if m:
+            current_section = m.group(1)
+            vars_by_section.setdefault(current_section, {})
+            continue
+        if current_section and '=' in line:
+            key, _, val = line.partition('=')
+            val = val.strip().strip('\"').strip(\"'\")
+            vars_by_section[current_section][key.strip()] = val
+
+# Merge: default first, then profile-specific overrides
+merged = {}
+merged.update(vars_by_section.get('default', {}))
+if profile != 'default':
+    merged.update(vars_by_section.get(profile, {}))
+
+for k, v in merged.items():
+    print(f'{k}={v}')
+" 2>/dev/null
+}
+
 _generate_session_id() {
   python3 -c "import uuid; print(uuid.uuid4())"
 }
@@ -188,7 +248,7 @@ for m in reversed(msgs):
 }
 
 _spawn_tmux() {
-  local id="$1" name="$2" system_prompt="${3:-}" workdir="${4:-$WORKDIR}" session_uuid="${5:-}"
+  local id="$1" name="$2" system_prompt="${3:-}" workdir="${4:-$WORKDIR}" session_uuid="${5:-}" profile="${6:-default}"
   local session_name state_dir claude_cmd
   session_name="$(_session_name "$id")"
   state_dir="$(_state_dir "$id")"
@@ -204,10 +264,28 @@ _spawn_tmux() {
   # Persist the session ID so respawns can resume the conversation
   _persist_session_id "$id" "$session_uuid"
 
-  # Unset API keys, set OAuth token for plugin auth
+  # Load profile-specific env vars (overrides global config)
+  local profile_env=""
+  profile_env=$(_load_profile_env "$profile")
+
   local oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+  local extra_env_vars=""
+  if [[ -n "$profile_env" ]]; then
+    while IFS='=' read -r key val; do
+      [[ -z "$key" ]] && continue
+      case "$key" in
+        CLAUDE_CODE_OAUTH_TOKEN) oauth_token="$val" ;;
+        *) extra_env_vars+=" ${key}='${val}'" ;;
+      esac
+    done <<< "$profile_env"
+  fi
+
+  # Persist the profile name for status/respawn
+  echo "$profile" > "$state_dir/.profile"
+
   claude_cmd="unset ANTHROPIC_API_KEY CLAUDE_API_KEY;"
   [[ -n "$oauth_token" ]] && claude_cmd+=" CLAUDE_CODE_OAUTH_TOKEN='$oauth_token'"
+  [[ -n "$extra_env_vars" ]] && claude_cmd+="$extra_env_vars"
   claude_cmd+=" DISCORD_STATE_DIR='$state_dir' claude"
   claude_cmd+=" --channels plugin:discord@claude-plugins-official"
   claude_cmd+=" --dangerously-skip-permissions"
@@ -258,6 +336,10 @@ cmd_spawn() {
     workdir="$(_resolve_workdir "$name")"
   fi
 
+  # Resolve profile for this channel
+  local profile
+  profile="$(_resolve_profile "$name")"
+
   # --fresh: generate a new UUID to start a clean conversation
   local session_uuid=""
   if $fresh; then
@@ -265,10 +347,10 @@ cmd_spawn() {
     echo "FRESH  new session-id=$session_uuid"
   fi
 
-  _spawn_tmux "$channel_id" "$name" "$system_prompt" "$workdir" "$session_uuid"
+  _spawn_tmux "$channel_id" "$name" "$system_prompt" "$workdir" "$session_uuid" "$profile"
   _registry_set "$channel_id" "channel" "$name"
 
-  echo "SPAWNED  $(_session_name "$channel_id")  name=$name  workdir=${workdir}"
+  echo "SPAWNED  $(_session_name "$channel_id")  name=$name  workdir=${workdir}  profile=$profile"
 }
 
 cmd_spawn_thread() {
@@ -325,24 +407,34 @@ with open(p, 'w') as f: json.dump(cfg, f, indent=2)
     fi
   fi
 
-  _spawn_tmux "$thread_id" "$name" "$prompt" "$workdir" ""
+  # Inherit profile from parent channel
+  local profile="default"
+  local parent_profile_file="$(_state_dir "$parent_id")/.profile"
+  [[ -f "$parent_profile_file" ]] && profile="$(cat "$parent_profile_file")"
+
+  _spawn_tmux "$thread_id" "$name" "$prompt" "$workdir" "" "$profile"
   _registry_set "$thread_id" "thread" "$name" "$parent_id"
 
-  echo "SPAWNED  $(_session_name "$thread_id")  name=$name  parent=$parent_id  workdir=${workdir:-$WORKDIR}"
+  echo "SPAWNED  $(_session_name "$thread_id")  name=$name  parent=$parent_id  workdir=${workdir:-$WORKDIR}  profile=$profile"
 }
 
 cmd_list() {
   _ensure_dirs
   echo "Discord Sessions:"
   python3 -c "
-import json, subprocess
+import json, subprocess, os
 with open('$SESSIONS_REGISTRY') as f: reg = json.load(f)
 if not reg: print('  (none)'); exit()
 for cid, info in sorted(reg.items(), key=lambda x: x[1].get('created','')):
     alive = subprocess.run(['tmux', 'has-session', '-t', info['tmux']], capture_output=True).returncode == 0
     status = 'UP' if alive else 'DOWN'
     parent = f'  parent={info[\"parent\"]}' if info.get('parent') else ''
-    print(f'  [{status:4}]  {info[\"tmux\"]:30}  {info[\"type\"]:7}  {info[\"name\"]}{parent}')
+    profile_file = os.path.join('$SESSIONS_DIR', cid, '.profile')
+    profile = 'default'
+    if os.path.isfile(profile_file):
+        with open(profile_file) as pf:
+            profile = pf.read().strip()
+    print(f'  [{status:4}]  {info[\"tmux\"]:30}  {info[\"type\"]:7}  {info[\"name\"]:20}  profile={profile}{parent}')
 "
 }
 
@@ -396,13 +488,17 @@ for cid, info in reg.items():
       local session_uuid=""
       session_uuid="$(_read_session_id "$cid")"
 
+      # Read persisted profile
+      local profile="default"
+      [[ -f "$(_state_dir "$cid")/.profile" ]] && profile="$(cat "$(_state_dir "$cid")/.profile")"
+
       if [[ "$type" == "thread" && "$parent" != "-" ]]; then
         local pf="$(_state_dir "$cid")/.system-prompt"
         local sp=""
         [[ -f "$pf" ]] && sp="$(cat "$pf")"
-        _spawn_tmux "$cid" "$name" "$sp" "$wd" "$session_uuid"
+        _spawn_tmux "$cid" "$name" "$sp" "$wd" "$session_uuid" "$profile"
       else
-        _spawn_tmux "$cid" "$name" "" "$wd" "$session_uuid"
+        _spawn_tmux "$cid" "$name" "" "$wd" "$session_uuid" "$profile"
       fi
     fi
   done
@@ -493,9 +589,11 @@ print(reg.get('$id', {}).get('name', 'unknown'))
 " 2>/dev/null)
     [[ -f "$(_state_dir "$id")/.workdir" ]] && wd="$(cat "$(_state_dir "$id")/.workdir")"
     session_uuid="$(_read_session_id "$id")"
+    local profile="default"
+    [[ -f "$(_state_dir "$id")/.profile" ]] && profile="$(cat "$(_state_dir "$id")/.profile")"
     _ensure_state_dir "$id"
-    _spawn_tmux "$id" "$name" "" "$wd" "$session_uuid"
-    echo "WOKE  $(_session_name "$id")  name=$name"
+    _spawn_tmux "$id" "$name" "" "$wd" "$session_uuid" "$profile"
+    echo "WOKE  $(_session_name "$id")  name=$name  profile=$profile"
   else
     echo "ALIVE  $(_session_name "$id") (not suspended)"
   fi
