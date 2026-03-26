@@ -1230,7 +1230,8 @@ async function watchTick(state: WatchState): Promise<void> {
   const allLines = raw.split("\n");
   // Strip leading blank lines
   while (allLines.length && !allLines[0].trim()) allLines.shift();
-  // Strip TUI chrome from the bottom (input bar, separator lines, status line)
+  // Strip TUI chrome from the bottom (separator lines, bare prompt, keybinding hints)
+  // Keep the status bar (model, tokens, cost, rate) — it's useful info
   while (allLines.length) {
     const last = allLines[allLines.length - 1].trim();
     if (
@@ -1238,15 +1239,12 @@ async function watchTick(state: WatchState): Promise<void> {
       last.match(/^[─━═▔▁_\-─]{3,}$/) ||    // separator lines (pure)
       last.match(/^[─━═▔▁_\-─\s]+$/) ||      // separator lines with spaces
       last.match(/^[❯>]\s*$/) ||              // bare prompt
-      last.match(/bypass permissions/) ||      // status bar
+      last.match(/bypass permissions/) ||      // permission mode text
       last.match(/auto-compact/) ||            // compact indicator
       last.match(/shift\+tab/) ||              // keybinding hints
       last.match(/esc to interrupt/) ||        // interrupt hint
       last.match(/hold Space/) ||              // voice hint
-      last.match(/^⏵⏵/) ||                    // permission mode indicator
-      last.match(/Sonnet|Opus|Haiku/) && last.match(/tok:|rate:|cache:|200K|100K/) ||  // status bar with model + stats
-      last.match(/\d+K \[#/) ||               // context gauge [##--------]
-      last.match(/●.*\/effort/)               // effort indicator
+      last.match(/^⏵⏵/)                       // permission mode indicator
     ) {
       allLines.pop();
     } else {
