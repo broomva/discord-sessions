@@ -269,12 +269,15 @@ _spawn_tmux() {
   profile_env=$(_load_profile_env "$profile")
 
   local oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+  local claude_model="" claude_effort=""
   local extra_env_vars=""
   if [[ -n "$profile_env" ]]; then
     while IFS='=' read -r key val; do
       [[ -z "$key" ]] && continue
       case "$key" in
         CLAUDE_CODE_OAUTH_TOKEN) oauth_token="$val" ;;
+        CLAUDE_MODEL)            claude_model="$val" ;;
+        CLAUDE_EFFORT)           claude_effort="$val" ;;
         *) extra_env_vars+=" ${key}='${val}'" ;;
       esac
     done <<< "$profile_env"
@@ -291,6 +294,8 @@ _spawn_tmux() {
   claude_cmd+=" --dangerously-skip-permissions"
   claude_cmd+=" --session-id '${session_uuid}'"
   claude_cmd+=" --name '${name}'"
+  [[ -n "$claude_model" ]]  && claude_cmd+=" --model '${claude_model}'"
+  [[ -n "$claude_effort" ]] && claude_cmd+=" --effort '${claude_effort}'"
 
   if [[ -n "$system_prompt" ]]; then
     local pf="$state_dir/.system-prompt"
